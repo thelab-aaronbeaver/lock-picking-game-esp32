@@ -1,0 +1,649 @@
+#include <Arduino.h>
+#include <LiquidCrystal_I2C.h>  // Include the LiquidCrystal_I2C library
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <uri/UriBraces.h>
+#include <Arduino_JSON.h>  // For JSON parsing
+
+// Define LCD parameters
+#define I2C_ADDR 0x27  //  Check your LCD's I2C address. Common ones are 0x27 or 0x3F.
+#define LCD_COLUMNS 20
+#define LCD_ROWS 4
+
+// Create LCD object
+LiquidCrystal_I2C lcd(I2C_ADDR, LCD_COLUMNS, LCD_ROWS);
+
+// Define GPIO pins
+const int buttonPin = 15;
+
+struct CylinderState {
+  int pin;
+  int ledPin;
+  int norm;
+  int raw;
+  int mapped;
+  bool triggered;
+  unsigned long time;
+};
+
+const int CYLINDER_COUNT = 3;
+CylinderState cylinders[CYLINDER_COUNT] = {
+  {32, 14, 0, 0, 0, false, 0},
+  {35, 12, 0, 0, 0, false, 0},
+  {34, 13, 0, 0, 0, false, 0}
+};
+
+int reading = 0;
+int buttonValue = 0;
+
+
+const int THRESHOLD = 10;
+
+
+//--- board ID --
+int boardID = 18;
+int gameID = 0;
+//int playerID;
+
+// Button state variables
+int buttonState;
+int previousButtonState = HIGH;
+const int debounceDelay = 30;
+unsigned long lastDebounceTime = 0;
+unsigned long buttonPressStartTime = 0;
+
+// Stopwatch variables
+unsigned long startTime = 0;
+int runCount = 0;
+bool stopwatchRunning = false;
+const unsigned long stopwatchLimit = 120000;  // 60 seconds in milliseconds
+
+bool confirm = false;
+bool longPressHandled = false;
+bool lapClearPending = false;
+unsigned long lapClearStartTime = 0;
+String lastLine0 = "";
+bool statusMessageActive = false;
+unsigned long statusMessageUntil = 0;
+String statusLine1 = "";
+
+
+// Function to check if all pots are past 50%
+bool allCylindersTriggered() {
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    if (!cylinders[i].triggered) {
+      return false;
+    }
+  }
+  return true;
+}
+// Function to check if all LEDs are off
+bool allLedsOff() {
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    if (digitalRead(cylinders[i].ledPin) != LOW) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// WiFi credentials
+const char* ssid = "Hardware Setup";
+const char* password = "Lock6121";
+//const int WIFI_CHANNEL = 6;
+IPAddress staticIP(192, 168, 1, 24);  // Desired static IP
+IPAddress gateway(192, 168, 1, 1);    // Gateway IP (usually your router)
+IPAddress subnet(255, 255, 255, 0);   // Subnet mask
+IPAddress dns(1, 1, 1, 1);            // DNS server IP (often the same as the gateway)
+
+
+
+// Create a web server object on port 80
+WebServer server(80);
+
+// Variable to store the received command
+String receivedCommand = "";
+
+// Variable to store the player ID
+String playerID = "";
+
+
+// Flag to indicate if the stopwatch should be started
+bool startStopwatch = false;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(buttonPin, INPUT_PULLUP);
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    pinMode(cylinders[i].pin, INPUT);
+    pinMode(cylinders[i].ledPin, OUTPUT);
+  }
+  // Read initial button state
+  previousButtonState = digitalRead(buttonPin);
+  delay(100);
+  // Initialize the LCD
+  lcd.init();
+  lcd.backlight();  // Turn on the backlight
+  lcd.clear();      // Clear the LCD display
+
+  // Print initial message on LCD (optional)
+  lcd.setCursor(0, 0);
+  lcd.print("Loc Doc ");
+  lcd.print("ID:");
+  lcd.print(boardID);
+  // Print initial message on LCD
+  lcd.setCursor(0, 1);
+  lcd.print("Connecting to WiFi");
+
+  // Connect to WiFi (with detailed feedback on LCD)
+  WiFi.mode(WIFI_STA);  // Set WiFi mode to station (client)
+  // Configure static IP before connecting
+  if (!WiFi.config(staticIP, gateway, subnet, dns)) {
+    Serial.println("STA Failed to configure static IP");
+  }
+  WiFi.begin(ssid, password);
+
+  int wifiRetryCount = 0;
+  const int MAX_WIFI_RETRIES = 1;
+
+
+  while (WiFi.status() != WL_CONNECTED && wifiRetryCount < MAX_WIFI_RETRIES) {
+    lcd.setCursor(0, 1);
+    lcd.print("Connecting...");
+    for (int i = 0; i < 4 && WiFi.status() != WL_CONNECTED; i++) {
+      lcd.print(".");
+      delay(500);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Connection failed");
+      lcd.setCursor(0, 1);
+      lcd.print("Retrying...");
+      delay(2000);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Connecting to WiFi");
+    }
+    wifiRetryCount++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    // WiFi connected!
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Loc Doc ");
+    lcd.print("ID:");
+    lcd.print(boardID);
+    lcd.setCursor(0, 1);
+    lcd.print("WiFi connected!");
+    lcd.setCursor(0, 2);
+    lcd.print("URL:");
+    lcd.print(WiFi.localIP());
+    lcd.setCursor(0, 3);
+    lcd.print("SCAN QR for info");
+    delay(10000);  // Show message for a few seconds
+    lcd.clear();
+  } else {
+    // WiFi connection failed after multiple attempts
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi connection");
+    lcd.setCursor(0, 1);
+    lcd.print("failed!");
+    delay(2000);
+    lcd.clear();
+  }
+
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    const int cylinderBaseValue = analogRead(cylinders[i].pin);
+    cylinders[i].norm = cylinderBaseValue / 40.95;
+  }
+
+
+  //lcd.setCursor(0, 3);
+  // Start the web server
+  // Start the web server
+  server.on("/", handleRoot);
+  server.on("/command", handleCommand);
+  // ... (add other request handlers as needed)
+  server.begin();
+  Serial.println("Server started");
+}
+
+
+
+
+void loop() {
+    reading = digitalRead(buttonPin);
+
+    // Handle client requests
+    server.handleClient();
+
+    // Read potentiometer values
+    for (int i = 0; i < CYLINDER_COUNT; i++) {
+      cylinders[i].raw = analogRead(cylinders[i].pin);
+      cylinders[i].mapped = map(cylinders[i].raw, 0, 4095, 0, 100);
+    }
+    // --- LED Light Check (before button logic) ---
+    for (int i = 0; i < CYLINDER_COUNT; i++) {
+      cylinders[i].triggered = checkLEDLight(cylinders[i]);
+    }
+
+    if (receivedCommand != "") {
+      if (receivedCommand == "start" && allLedsOff()) {
+        startStopwatch = true;
+        Serial.print("Player ID: ");
+        Serial.println(playerID);  // Print the player ID
+                                   // ... (rest of your stopwatch starting logic)
+        lcd.clear();
+        startLightSequence();
+        stopwatchRunning = true;
+        startTime = millis();
+        for (int i = 0; i < CYLINDER_COUNT; i++) {
+          cylinders[i].time = 0;
+          cylinders[i].triggered = false;
+        }
+        lapClearPending = false;
+        lapClearStartTime = 0;
+        lcd.clear();  // Clear any previous messages
+        gameID++;
+        lcd.setCursor(18, 3);
+        lcd.print(gameID);
+
+      } else {
+        setLine0("  Reset cylinders! ");
+        delay(2000);
+        //break;
+      }
+      receivedCommand = "";
+
+    }
+
+    // --- Button logic with debouncing and LED check ---
+    if (reading != previousButtonState) {
+      lastDebounceTime = millis();
+    }
+
+    if ((millis() - lastDebounceTime) > debounceDelay) {
+      if (reading != buttonState) {
+        buttonState = reading;
+        if (buttonState == LOW) {  // Button pressed
+          buttonPressStartTime = millis();
+          longPressHandled = false;
+          if (stopwatchRunning) {
+            stopwatchRunning = false;
+            Serial.println("Stopwatch Stopped");
+          } else if (allLedsOff()) {
+            lcd.clear();
+            startLightSequence();
+            stopwatchRunning = true;
+            startTime = millis();
+            for (int i = 0; i < CYLINDER_COUNT; i++) {
+              cylinders[i].time = 0;
+              cylinders[i].triggered = false;
+            }
+            lapClearPending = false;
+            lapClearStartTime = 0;
+            lcd.clear();  // Clear any previous messages
+            gameID++;
+            lcd.setCursor(18, 3);
+            lcd.print(gameID);
+          } else {
+            setLine0("  Reset cylinders! ");
+            delay(2000);
+          }
+        }
+      }
+    }
+
+    if (buttonState == LOW) {  // Check for long press only when button is held down
+      unsigned long longPressTime = millis() - buttonPressStartTime;
+      if (longPressTime > 10000 && !longPressHandled) {  // 10 seconds
+        longPressHandled = true;
+        resetGameState();  // Re-init game state only
+      }
+    } else {
+      longPressHandled = false;
+    }
+
+    previousButtonState = reading;
+
+    // --- Stopwatch and Cylinder Logic ---
+    if (stopwatchRunning) {
+      for (int i = 0; i < CYLINDER_COUNT; i++) {
+        checkCylinderTrigger(cylinders[i]);
+      }
+      displayLapTimesOnLCD();
+
+      unsigned long currentTime = millis() - startTime;
+
+      if (currentTime >= stopwatchLimit || allCylindersTriggered()) {
+        stopwatchRunning = false;
+        //gameID++;
+        sendDataToDatabase(currentTime, cylinders[0].time, cylinders[1].time, cylinders[2].time, boardID, gameID, playerID);  //SEND CODE, playerID
+        lapClearPending = true;
+        lapClearStartTime = millis();
+        if (currentTime >= stopwatchLimit) {
+          //lcd.setCursor(0, 0);
+          //lcd.print("Times Up!");
+        } else {
+          //lcd.setCursor(0, 0);
+          //lcd.print("Finished!");
+        }
+      } else {
+        displayTimeOnLCD(currentTime);
+      }
+    } else {
+      // --- Reset cylinders when stopwatch is not running ---
+      for (int i = 0; i < CYLINDER_COUNT; i++) {
+        cylinders[i].triggered = checkLEDLight(cylinders[i]);
+      }
+      if (lapClearPending) {
+        if (allLedsOff() && lapClearStartTime == 0) {
+          lapClearStartTime = millis();
+        }
+        if (lapClearStartTime > 0 && (millis() - lapClearStartTime) >= 5000) {
+          clearLapRows();
+          lapClearPending = false;
+        }
+      }
+
+      // --- Display "Ready" or "Finished!" ---
+      if (statusMessageActive && millis() >= statusMessageUntil) {
+        statusMessageActive = false;
+        statusLine1 = "";
+        clearLine(1);
+        lastLine0 = "";
+      }
+
+      if (allLedsOff() && !statusMessageActive) {
+        setLine0("Button:  Start/Reset");
+        //lcd.setCursor(0, 1);
+        //lcd.print("Push Button to Start");
+      } else {
+        //lcd.print("DONE! ");
+        lastLine0 = "";
+      }
+    }
+  
+}
+
+
+// Function to format and display time on LCD
+void displayTimeOnLCD(unsigned long time) {
+  unsigned long milliseconds = time % 1000;
+  unsigned long seconds = (time / 1000) % 60;
+  unsigned long minutes = (time / (1000 * 60)) % 60;
+
+  // Divide milliseconds by 10 to get 2 digits
+  int formattedMillis = milliseconds / 10;
+
+  lastLine0 = "__timer__";
+  clearLine(0);
+  lcd.setCursor(0, 0);
+  lcd.print("Timer:");
+  lcd.printf("%02d:%02d:%02d", minutes, seconds, formattedMillis);
+}
+
+void displayLapTimesOnLCD() {
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    lcd.setCursor(0, i + 1);
+    lcd.print("C");
+    lcd.print(i + 1);
+    lcd.print(" ");
+    displayLapTime(cylinders[i].time);
+  }
+}
+
+void displayLapTime(unsigned long time) {
+  unsigned long milliseconds = time % 1000;
+  unsigned long seconds = (time / 1000) % 60;
+  unsigned long minutes = (time / (1000 * 60)) % 60;
+
+  // Divide milliseconds by 10 to get 2 digits
+  int formattedMillis = milliseconds / 10;
+
+
+  lcd.printf("%02d:%02d:%02d", minutes, seconds, formattedMillis);
+}
+
+void clearLine(int row) {
+  lcd.setCursor(0, row);
+  for (int i = 0; i < LCD_COLUMNS; i++) {
+    lcd.print(" ");
+  }
+  lcd.setCursor(0, row);
+}
+
+void setLine0(const String& text) {
+  if (lastLine0 != text) {
+    clearLine(0);
+    lcd.setCursor(0, 0);
+    lcd.print(text);
+    lastLine0 = text;
+  }
+}
+
+void showStatusMessage(const String& line0, const String& line1, unsigned long durationMs) {
+  statusMessageActive = true;
+  statusMessageUntil = millis() + durationMs;
+  statusLine1 = line1;
+  setLine0(line0);
+  clearLine(1);
+  lcd.setCursor(0, 1);
+  lcd.print(line1);
+}
+
+void clearLapRows() {
+  for (int row = 1; row <= 3; row++) {
+    clearLine(row);
+  }
+}
+
+void showStartScreen(int litCount) {
+  clearLine(1);
+  clearLine(2);
+  clearLine(3);
+  lcd.setCursor(0, 1);
+  lcd.print("Get Ready...");
+  lcd.setCursor(0, 2);
+  lcd.print("Lights: [");
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    lcd.print(i < litCount ? "#" : " ");
+  }
+  lcd.print("]");
+  lcd.setCursor(0, 3);
+  if (litCount < CYLINDER_COUNT) {
+    lcd.print("Hold steady");
+  } else {
+    lcd.print("GO!");
+  }
+}
+
+void startLightSequence() {
+  setLine0("   START SEQUENCE");
+  showStartScreen(1);
+  digitalWrite(cylinders[0].ledPin, HIGH);  // Red LED on
+  delay(1000);
+  showStartScreen(2);
+  digitalWrite(cylinders[1].ledPin, HIGH);  // Yellow LED on
+  delay(1000);
+  showStartScreen(3);
+  digitalWrite(cylinders[2].ledPin, HIGH);  // Green LED on
+  delay(2000);
+  digitalWrite(cylinders[0].ledPin, LOW);  // All LEDs off
+  digitalWrite(cylinders[1].ledPin, LOW);
+  digitalWrite(cylinders[2].ledPin, LOW);
+}
+
+void resetGameState() {
+  stopwatchRunning = false;
+  startStopwatch = false;
+  lapClearPending = false;
+  lapClearStartTime = 0;
+  for (int i = 0; i < CYLINDER_COUNT; i++) {
+    cylinders[i].triggered = false;
+    cylinders[i].time = 0;
+    digitalWrite(cylinders[i].ledPin, LOW);
+  }
+  clearLapRows();
+  setLine0("Game reset");
+  delay(5000);
+  setLine0("Ready");
+}
+
+void checkCylinderTrigger(CylinderState& cylinder) {
+  const int UPPER_THRESHOLD = cylinder.norm + THRESHOLD;
+  const int LOWER_THRESHOLD = cylinder.norm - THRESHOLD;
+  if ((cylinder.mapped > UPPER_THRESHOLD || cylinder.mapped < LOWER_THRESHOLD) && !cylinder.triggered) {
+    cylinder.time = millis() - startTime;
+    cylinder.triggered = true;
+    digitalWrite(cylinder.ledPin, HIGH);
+    //... (other actions)
+  }
+}
+
+bool checkLEDLight(CylinderState& cylinder) {
+  const int UPPER_THRESHOLD = cylinder.norm + THRESHOLD;
+  const int LOWER_THRESHOLD = cylinder.norm - THRESHOLD;
+  if (cylinder.mapped > LOWER_THRESHOLD && cylinder.mapped < UPPER_THRESHOLD) {
+    cylinder.triggered = false;
+    digitalWrite(cylinder.ledPin, LOW);
+    return false;
+  } else {
+    return cylinder.triggered;
+  }
+}
+
+// Function to send data to the MySQL database
+void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsigned long cylinder2, unsigned long cylinder3, unsigned long boardID, unsigned long gameID, String playerID) {
+ 
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    const char* url = "https://script.google.com/macros/s/AKfycbwo8wncxh6L0x-wDc5RT1dIAptuNb1eY-IcFOEjII1hwW6AdJlWYsD6ChTkfPoyS2cx/exec";
+    showStatusMessage("Sending data...", "Please wait", 2000);
+
+    // Create JSON object
+    JSONVar data;
+    data["totalTime"] = totalTime;
+    data["cylinder1"] = cylinder1;
+    data["cylinder2"] = cylinder2;
+    data["cylinder3"] = cylinder3;
+    data["boardID"] = boardID;
+    data["gameID"] = gameID;
+    data["playerID"] = playerID;
+
+    String jsonString = JSON.stringify(data);  // Convert JSON to string
+
+    if (jsonString == "null" || jsonString.length() == 0) {  //json conversion error check.
+      Serial.println("Json Conversion Error");
+      showStatusMessage("Send failed", "JSON error", 2000);
+      return;
+    }
+
+    // Replace with your Google Apps Script Web App URL
+    http.begin(url);
+    http.setReuse(false);
+    http.setTimeout(15000);
+
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Accept", "application/json");
+
+    int httpResponseCode = http.POST(jsonString);
+
+    if (httpResponseCode > 0) {
+      Serial.printf("[HTTP] POST... code: %d\n", httpResponseCode);
+      String location = http.header("Location");
+      if (location.length() > 0) {
+        Serial.print("Redirect Location: ");
+        Serial.println(location);
+      }
+      String payload = http.getString();
+      Serial.println("Server response:");
+      Serial.println(payload);
+      if ((httpResponseCode >= 200 && httpResponseCode < 300) ||
+          httpResponseCode == HTTP_CODE_FOUND || httpResponseCode == HTTP_CODE_SEE_OTHER ||
+          httpResponseCode == 307 || httpResponseCode == 308) {
+        showStatusMessage("Send OK", "Data saved", 2000);
+      } else {
+        showStatusMessage("Send failed", "Server error", 2000);
+      }
+    } else {
+      Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
+      showStatusMessage("Send failed", "Network error", 2000);
+    }
+
+    http.end();
+  } else {
+    Serial.println("WiFi not connected, skipping POST");
+    showStatusMessage("Send failed", "No WiFi", 2000);
+  }
+}
+
+
+// Handling function for the root path ("/")
+void handleRoot() {
+  String html = "<!DOCTYPE html>"
+                "<html>"
+                "<head>"
+                "<title>Lock Picking App</title>"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"  // Viewport for responsiveness
+                "<style>"
+                "body {"
+                "  font-family: sans-serif;"
+                "  margin: 0;"           // Remove default body margin
+                "  padding: 20px;"       // Add some padding
+                "  text-align: center;"  // Center content
+                "}"
+                "h1 {"
+                "  font-size: 24px;"  // Adjust heading font size
+                "  margin-bottom: 20px;"
+                "}"
+                "input[type='text'] {"
+                "  width: 80%;"        // Make input responsive
+                "  max-width: 300px;"  // Limit maximum width
+                "  padding: 10px;"
+                "  margin-bottom: 15px;"
+                "  font-size: 16px;"
+                "}"
+                "button {"
+                "  padding: 12px 24px;"
+                "  font-size: 18px;"
+                "  margin: 10px;"
+                "  width: 80%;"        // Make button responsive
+                "  max-width: 300px;"  // Limit maximum width
+                "  cursor: pointer;"   // Add cursor pointer
+                "}"
+                "</style>"
+                "</head>"
+                "<body>"
+                "<h1>ESP32 Control</h1>"
+                "<input type='text' id='playerID' placeholder='Enter Player ID'>"
+                "<button onclick=\"sendCommand('start')\">Start</button>"
+                "<script>"
+                "function sendCommand(command) {"
+                "  const playerID = document.getElementById('playerID').value;"
+                "  const url = '/command?command=' + command + '&playerID=' + playerID;"
+                "  fetch(url)"
+                "    .then(response => response.text())"
+                "    .then(data => { console.log('Success:', data); })"
+                "    .catch(error => { console.error('Error:', error); });"
+                "}"
+                "</script>"
+                "</body>"
+                "</html>";
+
+  server.send(200, "text/html", html);
+}
+
+// Handling function for the "/command" path
+void handleCommand() {
+  if (server.hasArg("command")) {
+    receivedCommand = server.arg("command");
+  }
+  if (server.hasArg("playerID")) {
+    playerID = server.arg("playerID");
+  }
+  server.send(200, "text/plain", "Command received: " + receivedCommand + ", Player ID: " + playerID);
+}
