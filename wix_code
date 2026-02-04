@@ -1,0 +1,131 @@
+import wixData from 'wix-data';
+import { setPlayerId, setCommand, setGlobalField } from 'backend/firebase';
+import { initializeApp } from 'firebase/app';
+import { getDatabase, ref, onValue } from 'firebase/database';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyD9FyYQvYIQF9BkAchQk2ta_6fgVEv5lDw",
+  authDomain: "lockpicking-game.firebaseapp.com",
+  databaseURL: "https://lockpicking-game-default-rtdb.firebaseio.com",
+  projectId: "lockpicking-game",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+let staffOptions = [];
+const boardIds = ["18"];
+const clearedBoards = {};
+const roundOptions = [
+  { label: "Round 1", value: "1" },
+  { label: "Round 2", value: "2" },
+  { label: "Round 3", value: "3" },
+  { label: "Round 4", value: "4" }
+];
+const gameOptions = [
+  { label: "Game 1", value: "1" },
+  { label: "Game 2", value: "2" },
+  { label: "Game 3", value: "3" },
+  { label: "Game 4", value: "4" }
+];
+
+$w.onReady(async () => {
+  const result = await wixData.query("Staff").limit(1000).find();
+  staffOptions = result.items.map(p => ({
+    label: p.fullName,
+    value: p._id
+  }));
+
+  $w('#boardRepeater').onItemReady(($item, itemData) => {
+    console.log('[repeater] onItemReady', itemData);
+
+    $item('#playerDropdown').options = staffOptions;
+    $item('#playerDropdown').value = itemData.playerId || "";
+
+    $item('#playerDropdown').onChange((event) => {
+      setPlayerId(itemData.boardId, event.target.value);
+    });
+
+    $item('#startBtn').onClick(() => setCommand(itemData.boardId, "start"));
+    $item('#stopBtn').onClick(() => setCommand(itemData.boardId, "stop"));
+    $item('#resetBtn').onClick(() => setCommand(itemData.boardId, "reset"));
+  });
+
+  $w('#startAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "start")));
+  $w('#stopAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "stop")));
+  $w('#resetAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "reset")));
+
+  // Master round/game selectors (outside repeater)
+  $w('#roundDropdown').options = roundOptions;
+  $w('#gameDropdown').options = gameOptions;
+  $w('#roundDropdown').onChange((event) => {
+    setGlobalField("scoreboard/current/round", event.target.value);
+  });
+  $w('#gameDropdown').onChange((event) => {
+    setGlobalField("scoreboard/current/game", event.target.value);
+  });
+
+  const rootRef = ref(db, '/');
+  onValue(rootRef, (snapshot) => {
+    const data = snapshot.val() || {};
+    console.log('[firebase] snapshot', data);
+    const current = data.scoreboard?.current || {};
+    const items = boardIds.map(id => {
+      const status = data[id]?.status || {};
+      const cyl = status.cylinders || {};
+      return {
+        _id: id,
+        boardId: id,
+        state: status.state || "offline",
+        total: status.lastTotalTime || 0,
+        running: status.running || false,
+        c1: cyl.c1 || 0,
+        c2: cyl.c2 || 0,
+        c3: cyl.c3 || 0,
+        playerId: data[id]?.playerID || ""
+      };
+    });
+
+    $w('#boardRepeater').data = items;
+
+    $w('#boardRepeater').forEachItem(($item, itemData) => {
+      console.log('[repeater] update', itemData.boardId, itemData);
+      $item('#boardTitle').text = `Board ${itemData.boardId}`;
+      $item('#boardState').text = `State: ${itemData.state}`;
+      $item('#boardTime').text = `Last: ${formatMs(itemData.total)}`;
+
+      $item('#c1Text').text = `C1: ${formatMs(itemData.c1)}`;
+      $item('#c2Text').text = `C2: ${formatMs(itemData.c2)}`;
+      $item('#c3Text').text = `C3: ${formatMs(itemData.c3)}`;
+
+      $item('#playerDropdown').options = staffOptions;
+      const isFinished = itemData.state === "finished";
+      if (isFinished) {
+        $item('#playerDropdown').value = "";
+        if (itemData.playerId && !clearedBoards[itemData.boardId]) {
+          clearedBoards[itemData.boardId] = true;
+          setPlayerId(itemData.boardId, "");
+        }
+      } else {
+        clearedBoards[itemData.boardId] = false;
+        $item('#playerDropdown').value = itemData.playerId || "";
+      }
+
+    });
+
+    $w('#roundDropdown').value = current.round || "";
+    $w('#gameDropdown').value = current.game || "";
+  });
+});
+
+function formatMs(ms) {
+  const total = Math.floor(ms / 10);
+  const mins = Math.floor(total / 6000);
+  const secs = Math.floor((total % 6000) / 100);
+  const hund = total % 100;
+  return `${pad(mins)}:${pad(secs)}:${pad(hund)}`;
+}
+
+function pad(n) {
+  return n.toString().padStart(2, '0');
+}

@@ -134,6 +134,8 @@ unsigned long lastStatusPublishMs = 0;
 const unsigned long STATUS_PUBLISH_INTERVAL_MS = 1000;
 unsigned long lastTotalTime = 0;
 String lastState = "idle";
+String currentRound = "";
+String currentGame = "";
 
 
 // Flag to indicate if the stopwatch should be started
@@ -563,6 +565,8 @@ void publishStatus(const String& state) {
   json += "\"boardID\":" + String(boardID) + ",";
   json += "\"gameID\":" + String(gameID) + ",";
   json += "\"playerID\":\"" + jsonEscape(playerID) + "\",";
+  json += "\"round\":\"" + jsonEscape(currentRound) + "\",";
+  json += "\"game\":\"" + jsonEscape(currentGame) + "\",";
   json += "\"state\":\"" + jsonEscape(state) + "\",";
   json += "\"running\":" + String(stopwatchRunning ? "true" : "false") + ",";
   json += "\"lastTotalTime\":" + String(lastTotalTime) + ",";
@@ -594,6 +598,16 @@ void pollFirebaseCommand() {
       String pid = Database.get<String>(async_client, pidPath);
       if (async_client.lastError().code() == 0 && pid != "null") {
         playerID = pid;
+      }
+      String roundPath = "/scoreboard/current/round";
+      String gamePath = "/scoreboard/current/game";
+      String roundValue = Database.get<String>(async_client, roundPath);
+      if (async_client.lastError().code() == 0 && roundValue != "null") {
+        currentRound = roundValue;
+      }
+      String gameValue = Database.get<String>(async_client, gamePath);
+      if (async_client.lastError().code() == 0 && gameValue != "null") {
+        currentGame = gameValue;
       }
     }
     applyCommand(cmd);
@@ -676,6 +690,8 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
     data["boardID"] = boardID;
     data["gameID"] = gameID;
     data["playerID"] = playerID;
+    data["round"] = currentRound;
+    data["game"] = currentGame;
 
     String jsonString = JSON.stringify(data);
 
@@ -726,7 +742,9 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
       fbJson += "\"cylinder3\":" + String(cylinder3) + ",";
       fbJson += "\"boardID\":" + String(boardID) + ",";
       fbJson += "\"gameID\":" + String(gameID) + ",";
-      fbJson += "\"playerID\":\"" + jsonEscape(playerID) + "\"";
+      fbJson += "\"playerID\":\"" + jsonEscape(playerID) + "\",";
+      fbJson += "\"round\":\"" + jsonEscape(currentRound) + "\",";
+      fbJson += "\"game\":\"" + jsonEscape(currentGame) + "\"";
       fbJson += "}";
       String runsPath = "/runs/" + String(boardID);
       Database.push(async_client, runsPath, object_t(fbJson));
