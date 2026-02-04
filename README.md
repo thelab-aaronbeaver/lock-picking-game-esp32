@@ -48,7 +48,12 @@ Update these constants in `lockpickking_game_code.ino`:
 - `FIREBASE_USER_EMAIL`
 - `FIREBASE_USER_PASSWORD`
 
-Install the Arduino library: **Firebase ESP Client** (`Firebase_ESP_Client`).
+Install the Arduino library: **FirebaseClient** (`FirebaseClient`).
+
+This sketch enables these build options before including the library:
+
+- `ENABLE_USER_AUTH`
+- `ENABLE_DATABASE`
 
 ### Database paths
 

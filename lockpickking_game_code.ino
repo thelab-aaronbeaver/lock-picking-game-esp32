@@ -1,11 +1,16 @@
 #include <Arduino.h>
 #include <LiquidCrystal_I2C.h>  // Include the LiquidCrystal_I2C library
+
+#define ENABLE_USER_AUTH
+#define ENABLE_DATABASE
+
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <uri/UriBraces.h>
 #include <Arduino_JSON.h>  // For JSON parsing
-#include <Firebase_ESP_Client.h>
+#include <FirebaseClient.h>
 
 // Define LCD parameters
 #define I2C_ADDR 0x27  //  Check your LCD's I2C address. Common ones are 0x27 or 0x3F.
@@ -115,9 +120,12 @@ const char* FIREBASE_DB_URL = "https://lockpicking-game-default-rtdb.firebaseio.
 const char* FIREBASE_USER_EMAIL = "media@locdoc.net";
 const char* FIREBASE_USER_PASSWORD = "Lock6121";
 
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config;
+UserAuth user_auth(FIREBASE_API_KEY, FIREBASE_USER_EMAIL, FIREBASE_USER_PASSWORD);
+FirebaseApp app;
+WiFiClientSecure ssl_client;
+using AsyncClient = AsyncClientClass;
+AsyncClient async_client(ssl_client);
+RealtimeDatabase Database;
 
 String firebaseBasePath = "";
 unsigned long lastCommandPollMs = 0;
@@ -135,6 +143,7 @@ void initFirebase();
 void publishStatus(const String& state);
 void pollFirebaseCommand();
 void applyCommand(const String& command);
+String jsonEscape(const String& input);
 
 void setup() {
   Serial.begin(115200);
@@ -246,6 +255,7 @@ void loop() {
 
     // Handle client requests
     server.handleClient();
+    app.loop();
     pollFirebaseCommand();
 
     // Read potentiometer values
@@ -532,38 +542,34 @@ bool checkLEDLight(CylinderState& cylinder) {
 }
 
 void initFirebase() {
-  config.api_key = FIREBASE_API_KEY;
-  config.database_url = FIREBASE_DB_URL;
-  auth.user.email = FIREBASE_USER_EMAIL;
-  auth.user.password = FIREBASE_USER_PASSWORD;
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
+  ssl_client.setInsecure();
+  initializeApp(async_client, app, getAuth(user_auth), 120000);
+  app.getApp(Database);
+  Database.url(FIREBASE_DB_URL);
   Serial.print("Firebase init: ");
-  Serial.println(Firebase.ready() ? "ready" : "not ready");
+  Serial.println(app.ready() ? "ready" : "not ready");
 }
 
 void publishStatus(const String& state) {
-  if (WiFi.status() != WL_CONNECTED || !Firebase.ready() || firebaseBasePath.length() == 0) {
+  if (WiFi.status() != WL_CONNECTED || !app.ready() || firebaseBasePath.length() == 0) {
     return;
   }
-  FirebaseJson json;
-  json.set("boardID", boardID);
-  json.set("gameID", gameID);
-  json.set("playerID", playerID);
-  json.set("state", state);
-  json.set("running", stopwatchRunning);
-  json.set("lastTotalTime", lastTotalTime);
-  json.set("cylinders/c1", cylinders[0].time);
-  json.set("cylinders/c2", cylinders[1].time);
-  json.set("cylinders/c3", cylinders[2].time);
-  json.set("updatedMs", (int)millis());
+  String json = "{";
+  json += "\"boardID\":" + String(boardID) + ",";
+  json += "\"gameID\":" + String(gameID) + ",";
+  json += "\"playerID\":\"" + jsonEscape(playerID) + "\",";
+  json += "\"state\":\"" + jsonEscape(state) + "\",";
+  json += "\"running\":" + String(stopwatchRunning ? "true" : "false") + ",";
+  json += "\"lastTotalTime\":" + String(lastTotalTime) + ",";
+  json += "\"cylinders\":{\"c1\":" + String(cylinders[0].time) + ",\"c2\":" + String(cylinders[1].time) + ",\"c3\":" + String(cylinders[2].time) + "},";
+  json += "\"updatedMs\":" + String(millis()) + "}";
 
-  Firebase.RTDB.setJSON(&fbdo, firebaseBasePath + "/status", &json);
+  Database.set(async_client, firebaseBasePath + "/status", object_t(json));
   lastState = state;
 }
 
 void pollFirebaseCommand() {
-  if (WiFi.status() != WL_CONNECTED || !Firebase.ready() || firebaseBasePath.length() == 0) {
+  if (WiFi.status() != WL_CONNECTED || !app.ready() || firebaseBasePath.length() == 0) {
     return;
   }
   if (millis() - lastCommandPollMs < COMMAND_POLL_INTERVAL_MS) {
@@ -572,20 +578,43 @@ void pollFirebaseCommand() {
   lastCommandPollMs = millis();
 
   String cmdPath = firebaseBasePath + "/command";
-  if (Firebase.RTDB.getString(&fbdo, cmdPath)) {
-    String cmd = fbdo.stringData();
-    cmd.trim();
-    if (cmd.length() > 0 && cmd != "idle") {
-      if (cmd == "start") {
-        String pidPath = firebaseBasePath + "/playerID";
-        if (Firebase.RTDB.getString(&fbdo, pidPath)) {
-          playerID = fbdo.stringData();
-        }
+  String cmd = Database.get(async_client, cmdPath);
+  if (async_client.lastError().code() != 0) {
+    return;
+  }
+  cmd.trim();
+  if (cmd.length() > 0 && cmd != "idle" && cmd != "null") {
+    if (cmd == "start") {
+      String pidPath = firebaseBasePath + "/playerID";
+      String pid = Database.get(async_client, pidPath);
+      if (async_client.lastError().code() == 0 && pid != "null") {
+        playerID = pid;
       }
-      applyCommand(cmd);
-      Firebase.RTDB.setString(&fbdo, cmdPath, "idle");
+    }
+    applyCommand(cmd);
+    Database.set(async_client, cmdPath, String("idle"));
+  }
+}
+
+String jsonEscape(const String& input) {
+  String output;
+  output.reserve(input.length() + 4);
+  for (size_t i = 0; i < input.length(); i++) {
+    char c = input[i];
+    if (c == '\"' || c == '\\') {
+      output += '\\';
+      output += c;
+    } else if (c == '\n') {
+      output += "\\n";
+    } else if (c == '\r') {
+      output += "\\r";
+    } else if (c == '\t') {
+      output += "\\t";
+    } else {
+      output += c;
     }
   }
+  return output;
 }
 
 void applyCommand(const String& command) {
@@ -684,21 +713,23 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
     http.end();
 
     // Also push results to Firebase
-    if (Firebase.ready()) {
-      FirebaseJson fbJson;
-      fbJson.set("totalTime", totalTime);
-      fbJson.set("cylinder1", cylinder1);
-      fbJson.set("cylinder2", cylinder2);
-      fbJson.set("cylinder3", cylinder3);
-      fbJson.set("boardID", boardID);
-      fbJson.set("gameID", gameID);
-      fbJson.set("playerID", playerID);
+    if (app.ready()) {
+      String fbJson = "{";
+      fbJson += "\"totalTime\":" + String(totalTime) + ",";
+      fbJson += "\"cylinder1\":" + String(cylinder1) + ",";
+      fbJson += "\"cylinder2\":" + String(cylinder2) + ",";
+      fbJson += "\"cylinder3\":" + String(cylinder3) + ",";
+      fbJson += "\"boardID\":" + String(boardID) + ",";
+      fbJson += "\"gameID\":" + String(gameID) + ",";
+      fbJson += "\"playerID\":\"" + jsonEscape(playerID) + "\"";
+      fbJson += "}";
       String runsPath = "/runs/" + String(boardID);
-      if (Firebase.RTDB.pushJSON(&fbdo, runsPath, &fbJson)) {
+      Database.push(async_client, runsPath, object_t(fbJson));
+      if (async_client.lastError().code() == 0) {
         fbSuccess = true;
       } else {
         fbSuccess = false;
-        Serial.printf("Firebase push failed: %s\n", fbdo.errorReason().c_str());
+        Serial.printf("Firebase push failed: %s\n", async_client.lastError().message().c_str());
       }
     } else {
       fbSuccess = false;
