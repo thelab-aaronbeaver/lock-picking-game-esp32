@@ -151,6 +151,7 @@ void setup() {
   for (int i = 0; i < CYLINDER_COUNT; i++) {
     pinMode(cylinders[i].pin, INPUT);
     pinMode(cylinders[i].ledPin, OUTPUT);
+    digitalWrite(cylinders[i].ledPin, LOW);
   }
   // Read initial button state
   previousButtonState = digitalRead(buttonPin);
@@ -217,6 +218,7 @@ void setup() {
     lcd.print("SCAN QR for info");
     delay(10000);  // Show message for a few seconds
     lcd.clear();
+    setLine0("Ready");
     firebaseBasePath = "/boards/" + String(boardID);
     initFirebase();
     publishStatus("ready");
@@ -402,12 +404,14 @@ void displayTimeOnLCD(unsigned long time) {
 
   // Divide milliseconds by 10 to get 2 digits
   int formattedMillis = milliseconds / 10;
+  char timeBuf[9];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02d", minutes, seconds, formattedMillis);
 
   lastLine0 = "__timer__";
   clearLine(0);
   lcd.setCursor(0, 0);
   lcd.print("Timer:");
-  lcd.printf("%02d:%02d:%02d", minutes, seconds, formattedMillis);
+  lcd.print(timeBuf);
 }
 
 void displayLapTimesOnLCD() {
@@ -428,8 +432,9 @@ void displayLapTime(unsigned long time) {
   // Divide milliseconds by 10 to get 2 digits
   int formattedMillis = milliseconds / 10;
 
-
-  lcd.printf("%02d:%02d:%02d", minutes, seconds, formattedMillis);
+  char timeBuf[9];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02d", minutes, seconds, formattedMillis);
+  lcd.print(timeBuf);
 }
 
 void clearLine(int row) {
@@ -578,7 +583,7 @@ void pollFirebaseCommand() {
   lastCommandPollMs = millis();
 
   String cmdPath = firebaseBasePath + "/command";
-  String cmd = Database.get(async_client, cmdPath);
+  String cmd = Database.get<String>(async_client, cmdPath);
   if (async_client.lastError().code() != 0) {
     return;
   }
@@ -586,7 +591,7 @@ void pollFirebaseCommand() {
   if (cmd.length() > 0 && cmd != "idle" && cmd != "null") {
     if (cmd == "start") {
       String pidPath = firebaseBasePath + "/playerID";
-      String pid = Database.get(async_client, pidPath);
+      String pid = Database.get<String>(async_client, pidPath);
       if (async_client.lastError().code() == 0 && pid != "null") {
         playerID = pid;
       }
