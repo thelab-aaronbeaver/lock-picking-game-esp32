@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <uri/UriBraces.h>
 #include <Arduino_JSON.h>  // For JSON parsing
+#include <Firebase_ESP_Client.h>
 
 // Define LCD parameters
 #define I2C_ADDR 0x27  //  Check your LCD's I2C address. Common ones are 0x27 or 0x3F.
@@ -108,9 +109,32 @@ String receivedCommand = "";
 // Variable to store the player ID
 String playerID = "";
 
+// Firebase config (Realtime Database)
+const char* FIREBASE_API_KEY = "YOUR_FIREBASE_API_KEY";
+const char* FIREBASE_DB_URL = "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com/";
+const char* FIREBASE_USER_EMAIL = "YOUR_FIREBASE_USER_EMAIL";
+const char* FIREBASE_USER_PASSWORD = "YOUR_FIREBASE_USER_PASSWORD";
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+String firebaseBasePath = "";
+unsigned long lastCommandPollMs = 0;
+const unsigned long COMMAND_POLL_INTERVAL_MS = 500;
+unsigned long lastStatusPublishMs = 0;
+const unsigned long STATUS_PUBLISH_INTERVAL_MS = 1000;
+unsigned long lastTotalTime = 0;
+String lastState = "idle";
+
 
 // Flag to indicate if the stopwatch should be started
 bool startStopwatch = false;
+
+void initFirebase();
+void publishStatus(const String& state);
+void pollFirebaseCommand();
+void applyCommand(const String& command);
 
 void setup() {
   Serial.begin(115200);
@@ -184,6 +208,9 @@ void setup() {
     lcd.print("SCAN QR for info");
     delay(10000);  // Show message for a few seconds
     lcd.clear();
+    firebaseBasePath = "/boards/" + String(boardID);
+    initFirebase();
+    publishStatus("ready");
   } else {
     // WiFi connection failed after multiple attempts
     lcd.clear();
@@ -219,6 +246,7 @@ void loop() {
 
     // Handle client requests
     server.handleClient();
+    pollFirebaseCommand();
 
     // Read potentiometer values
     for (int i = 0; i < CYLINDER_COUNT; i++) {
@@ -231,33 +259,8 @@ void loop() {
     }
 
     if (receivedCommand != "") {
-      if (receivedCommand == "start" && allLedsOff()) {
-        startStopwatch = true;
-        Serial.print("Player ID: ");
-        Serial.println(playerID);  // Print the player ID
-                                   // ... (rest of your stopwatch starting logic)
-        lcd.clear();
-        startLightSequence();
-        stopwatchRunning = true;
-        startTime = millis();
-        for (int i = 0; i < CYLINDER_COUNT; i++) {
-          cylinders[i].time = 0;
-          cylinders[i].triggered = false;
-        }
-        lapClearPending = false;
-        lapClearStartTime = 0;
-        lcd.clear();  // Clear any previous messages
-        gameID++;
-        lcd.setCursor(18, 3);
-        lcd.print(gameID);
-
-      } else {
-        setLine0("  Reset cylinders! ");
-        delay(2000);
-        //break;
-      }
+      applyCommand(receivedCommand);
       receivedCommand = "";
-
     }
 
     // --- Button logic with debouncing and LED check ---
@@ -274,6 +277,7 @@ void loop() {
           if (stopwatchRunning) {
             stopwatchRunning = false;
             Serial.println("Stopwatch Stopped");
+            publishStatus("stopped");
           } else if (allLedsOff()) {
             lcd.clear();
             startLightSequence();
@@ -289,6 +293,7 @@ void loop() {
             gameID++;
             lcd.setCursor(18, 3);
             lcd.print(gameID);
+            publishStatus("running");
           } else {
             setLine0("  Reset cylinders! ");
             delay(2000);
@@ -302,6 +307,7 @@ void loop() {
       if (longPressTime > 10000 && !longPressHandled) {  // 10 seconds
         longPressHandled = true;
         resetGameState();  // Re-init game state only
+        publishStatus("reset");
       }
     } else {
       longPressHandled = false;
@@ -324,6 +330,8 @@ void loop() {
         sendDataToDatabase(currentTime, cylinders[0].time, cylinders[1].time, cylinders[2].time, boardID, gameID, playerID);  //SEND CODE, playerID
         lapClearPending = true;
         lapClearStartTime = millis();
+        lastTotalTime = currentTime;
+        publishStatus("finished");
         if (currentTime >= stopwatchLimit) {
           //lcd.setCursor(0, 0);
           //lcd.print("Times Up!");
@@ -365,6 +373,12 @@ void loop() {
         //lcd.print("DONE! ");
         lastLine0 = "";
       }
+    }
+
+    if (millis() - lastStatusPublishMs >= STATUS_PUBLISH_INTERVAL_MS) {
+      String state = stopwatchRunning ? "running" : (allLedsOff() ? "ready" : lastState);
+      publishStatus(state);
+      lastStatusPublishMs = millis();
     }
   
 }
@@ -482,6 +496,7 @@ void resetGameState() {
   startStopwatch = false;
   lapClearPending = false;
   lapClearStartTime = 0;
+  lastTotalTime = 0;
   for (int i = 0; i < CYLINDER_COUNT; i++) {
     cylinders[i].triggered = false;
     cylinders[i].time = 0;
@@ -516,15 +531,107 @@ bool checkLEDLight(CylinderState& cylinder) {
   }
 }
 
-// Function to send data to the MySQL database
+void initFirebase() {
+  config.api_key = FIREBASE_API_KEY;
+  config.database_url = FIREBASE_DB_URL;
+  auth.user.email = FIREBASE_USER_EMAIL;
+  auth.user.password = FIREBASE_USER_PASSWORD;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void publishStatus(const String& state) {
+  if (WiFi.status() != WL_CONNECTED || !Firebase.ready() || firebaseBasePath.length() == 0) {
+    return;
+  }
+  FirebaseJson json;
+  json.set("boardID", boardID);
+  json.set("gameID", gameID);
+  json.set("playerID", playerID);
+  json.set("state", state);
+  json.set("running", stopwatchRunning);
+  json.set("lastTotalTime", lastTotalTime);
+  json.set("cylinders/c1", cylinders[0].time);
+  json.set("cylinders/c2", cylinders[1].time);
+  json.set("cylinders/c3", cylinders[2].time);
+  json.set("updatedMs", (int)millis());
+
+  Firebase.RTDB.setJSON(&fbdo, firebaseBasePath + "/status", &json);
+  lastState = state;
+}
+
+void pollFirebaseCommand() {
+  if (WiFi.status() != WL_CONNECTED || !Firebase.ready() || firebaseBasePath.length() == 0) {
+    return;
+  }
+  if (millis() - lastCommandPollMs < COMMAND_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastCommandPollMs = millis();
+
+  String cmdPath = firebaseBasePath + "/command";
+  if (Firebase.RTDB.getString(&fbdo, cmdPath)) {
+    String cmd = fbdo.stringData();
+    cmd.trim();
+    if (cmd.length() > 0 && cmd != "idle") {
+      if (cmd == "start") {
+        String pidPath = firebaseBasePath + "/playerID";
+        if (Firebase.RTDB.getString(&fbdo, pidPath)) {
+          playerID = fbdo.stringData();
+        }
+      }
+      applyCommand(cmd);
+      Firebase.RTDB.setString(&fbdo, cmdPath, "idle");
+    }
+  }
+}
+
+void applyCommand(const String& command) {
+  if (command == "start") {
+    if (allLedsOff()) {
+      startStopwatch = true;
+      Serial.print("Player ID: ");
+      Serial.println(playerID);
+      lcd.clear();
+      startLightSequence();
+      stopwatchRunning = true;
+      startTime = millis();
+      for (int i = 0; i < CYLINDER_COUNT; i++) {
+        cylinders[i].time = 0;
+        cylinders[i].triggered = false;
+      }
+      lapClearPending = false;
+      lapClearStartTime = 0;
+      lcd.clear();
+      gameID++;
+      lcd.setCursor(18, 3);
+      lcd.print(gameID);
+      publishStatus("running");
+    } else {
+      setLine0("  Reset cylinders! ");
+      delay(2000);
+    }
+  } else if (command == "stop") {
+    if (stopwatchRunning) {
+      stopwatchRunning = false;
+      publishStatus("stopped");
+    }
+  } else if (command == "reset") {
+    resetGameState();
+    publishStatus("reset");
+  }
+}
+
+// Function to send data to Google Apps Script and Firebase Realtime Database
 void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsigned long cylinder2, unsigned long cylinder3, unsigned long boardID, unsigned long gameID, String playerID) {
- 
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     const char* url = "https://script.google.com/macros/s/AKfycbwo8wncxh6L0x-wDc5RT1dIAptuNb1eY-IcFOEjII1hwW6AdJlWYsD6ChTkfPoyS2cx/exec";
     showStatusMessage("Sending data...", "Please wait", 2000);
+    bool gasSuccess = false;
+    bool fbSuccess = false;
 
-    // Create JSON object
+    // Create JSON object for Apps Script
     JSONVar data;
     data["totalTime"] = totalTime;
     data["cylinder1"] = cylinder1;
@@ -534,19 +641,17 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
     data["gameID"] = gameID;
     data["playerID"] = playerID;
 
-    String jsonString = JSON.stringify(data);  // Convert JSON to string
+    String jsonString = JSON.stringify(data);
 
-    if (jsonString == "null" || jsonString.length() == 0) {  //json conversion error check.
+    if (jsonString == "null" || jsonString.length() == 0) {
       Serial.println("Json Conversion Error");
       showStatusMessage("Send failed", "JSON error", 2000);
       return;
     }
 
-    // Replace with your Google Apps Script Web App URL
     http.begin(url);
     http.setReuse(false);
     http.setTimeout(15000);
-
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Accept", "application/json");
 
@@ -565,16 +670,48 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
       if ((httpResponseCode >= 200 && httpResponseCode < 300) ||
           httpResponseCode == HTTP_CODE_FOUND || httpResponseCode == HTTP_CODE_SEE_OTHER ||
           httpResponseCode == 307 || httpResponseCode == 308) {
-        showStatusMessage("Send OK", "Data saved", 2000);
+        gasSuccess = true;
       } else {
-        showStatusMessage("Send failed", "Server error", 2000);
+        gasSuccess = false;
       }
     } else {
       Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
-      showStatusMessage("Send failed", "Network error", 2000);
+      gasSuccess = false;
     }
 
     http.end();
+
+    // Also push results to Firebase
+    if (Firebase.ready()) {
+      FirebaseJson fbJson;
+      fbJson.set("totalTime", totalTime);
+      fbJson.set("cylinder1", cylinder1);
+      fbJson.set("cylinder2", cylinder2);
+      fbJson.set("cylinder3", cylinder3);
+      fbJson.set("boardID", boardID);
+      fbJson.set("gameID", gameID);
+      fbJson.set("playerID", playerID);
+      String runsPath = "/runs/" + String(boardID);
+      if (Firebase.RTDB.pushJSON(&fbdo, runsPath, &fbJson)) {
+        fbSuccess = true;
+      } else {
+        fbSuccess = false;
+        Serial.printf("Firebase push failed: %s\n", fbdo.errorReason().c_str());
+      }
+    } else {
+      fbSuccess = false;
+      Serial.println("Firebase not ready, skipping RTDB push");
+    }
+
+    if (gasSuccess && fbSuccess) {
+      showStatusMessage("Send OK", "GAS + FB", 2000);
+    } else if (gasSuccess && !fbSuccess) {
+      showStatusMessage("Send OK", "FB failed", 2000);
+    } else if (!gasSuccess && fbSuccess) {
+      showStatusMessage("GAS failed", "FB saved", 2000);
+    } else {
+      showStatusMessage("Send failed", "GAS + FB", 2000);
+    }
   } else {
     Serial.println("WiFi not connected, skipping POST");
     showStatusMessage("Send failed", "No WiFi", 2000);

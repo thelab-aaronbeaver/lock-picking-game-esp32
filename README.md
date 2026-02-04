@@ -33,16 +33,45 @@ This project runs a lock-picking style game on an ESP32 with three cylinder sens
 
 - The ESP32 hosts a page at `http://<device-ip>/` where a player ID can be entered.
 - Pressing "Start" sends a `/command?command=start&playerID=...` request.
+- Firebase can also send commands via the Realtime Database (see below).
 
-## Data logging
+## Firebase (Realtime Database)
 
-Results are POSTed as JSON to the Apps Script URL in `sendDataToDatabase()`:
+This firmware publishes status and run data to Firebase and listens for commands.
 
-- `totalTime`
-- `cylinder1`, `cylinder2`, `cylinder3`
-- `boardID`
-- `gameID`
-- `playerID`
+### Configure
+
+Update these constants in `lockpickking_game_code.ino`:
+
+- `FIREBASE_API_KEY`
+- `FIREBASE_DB_URL`
+- `FIREBASE_USER_EMAIL`
+- `FIREBASE_USER_PASSWORD`
+
+Install the Arduino library: **Firebase ESP Client** (`Firebase_ESP_Client`).
+
+### Database paths
+
+Status updates (per board):
+
+`/boards/<boardID>/status`
+
+Command channel (set from dashboard/Wix):
+
+`/boards/<boardID>/command`
+
+Supported values: `start`, `stop`, `reset`, `idle` (the device sets `idle` after handling).
+
+Optional player ID (set before start):
+
+`/boards/<boardID>/playerID`
+
+Run results are pushed to Firebase:
+
+`/runs/<boardID>/`
+
+Run results are also sent to the Google Apps Script endpoint in
+`sendDataToDatabase()` (same fields).
 
 ## Files
 
