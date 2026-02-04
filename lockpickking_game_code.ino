@@ -110,10 +110,10 @@ String receivedCommand = "";
 String playerID = "";
 
 // Firebase config (Realtime Database)
-const char* FIREBASE_API_KEY = "YOUR_FIREBASE_API_KEY";
-const char* FIREBASE_DB_URL = "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com/";
-const char* FIREBASE_USER_EMAIL = "YOUR_FIREBASE_USER_EMAIL";
-const char* FIREBASE_USER_PASSWORD = "YOUR_FIREBASE_USER_PASSWORD";
+const char* FIREBASE_API_KEY = "AIzaSyD9FyYQvYIQF9BkAchQk2ta_6fgVEv5lDw";
+const char* FIREBASE_DB_URL = "https://lockpicking-game-default-rtdb.firebaseio.com/";
+const char* FIREBASE_USER_EMAIL = "media@locdoc.net";
+const char* FIREBASE_USER_PASSWORD = "Lock6121";
 
 FirebaseData fbdo;
 FirebaseAuth auth;
