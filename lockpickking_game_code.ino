@@ -538,6 +538,8 @@ void initFirebase() {
   auth.user.password = FIREBASE_USER_PASSWORD;
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+  Serial.print("Firebase init: ");
+  Serial.println(Firebase.ready() ? "ready" : "not ready");
 }
 
 void publishStatus(const String& state) {
