@@ -16,6 +16,8 @@ const db = getDatabase(app);
 let staffOptions = [];
 const boardIds = ["18"];
 const clearedBoards = {};
+const lastSeenAt = {};
+const lastReportedMs = {};
 const roundOptions = [
   { label: "Round 1", value: "1" },
   { label: "Round 2", value: "2" },
@@ -28,6 +30,7 @@ const gameOptions = [
   { label: "Game 3", value: "3" },
   { label: "Game 4", value: "4" }
 ];
+const ACTIVE_WINDOW_MS = 30000; // 30s
 
 $w.onReady(async () => {
   const result = await wixData.query("Staff").limit(1000).find();
@@ -70,21 +73,34 @@ $w.onReady(async () => {
     const data = snapshot.val() || {};
     console.log('[firebase] snapshot', data);
     const current = data.scoreboard?.current || {};
-    const items = boardIds.map(id => {
-      const status = data[id]?.status || {};
-      const cyl = status.cylinders || {};
-      return {
-        _id: id,
-        boardId: id,
-        state: status.state || "offline",
-        total: status.lastTotalTime || 0,
-        running: status.running || false,
-        c1: cyl.c1 || 0,
-        c2: cyl.c2 || 0,
-        c3: cyl.c3 || 0,
-        playerId: data[id]?.playerID || ""
-      };
-    });
+    const boards = data.boards || {};
+    const items = boardIds
+      .map(id => {
+        const status = boards[id]?.status || {};
+        const cyl = status.cylinders || {};
+        const updatedMs = status.updatedMs || 0;
+        if (updatedMs && updatedMs !== lastReportedMs[id]) {
+          lastReportedMs[id] = updatedMs;
+          lastSeenAt[id] = Date.now();
+        }
+        return {
+          _id: id,
+          boardId: id,
+          state: status.state || "offline",
+          total: status.lastTotalTime || 0,
+          running: status.running || false,
+          c1: cyl.c1 || 0,
+          c2: cyl.c2 || 0,
+          c3: cyl.c3 || 0,
+          playerId: boards[id]?.playerID || "",
+          updatedMs
+        };
+      })
+      .filter(item => {
+        const lastSeen = lastSeenAt[item.boardId] || 0;
+        const age = Date.now() - lastSeen;
+        return lastSeen > 0 && age <= ACTIVE_WINDOW_MS;
+      });
 
     $w('#boardRepeater').data = items;
 

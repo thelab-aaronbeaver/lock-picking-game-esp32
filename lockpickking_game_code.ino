@@ -129,13 +129,18 @@ RealtimeDatabase Database;
 
 String firebaseBasePath = "";
 unsigned long lastCommandPollMs = 0;
-const unsigned long COMMAND_POLL_INTERVAL_MS = 500;
+const unsigned long COMMAND_POLL_INTERVAL_MS = 2000;
 unsigned long lastStatusPublishMs = 0;
-const unsigned long STATUS_PUBLISH_INTERVAL_MS = 1000;
+const unsigned long STATUS_PUBLISH_INTERVAL_MS = 5000;
 unsigned long lastTotalTime = 0;
 String lastState = "idle";
 String currentRound = "";
 String currentGame = "";
+unsigned long lastWifiReconnectMs = 0;
+unsigned long lastHeapLogMs = 0;
+const unsigned long WIFI_RECONNECT_INTERVAL_MS = 10000;
+const unsigned long HEAP_LOG_INTERVAL_MS = 30000;
+const bool ENABLE_GAS = false;
 
 
 // Flag to indicate if the stopwatch should be started
@@ -174,6 +179,8 @@ void setup() {
 
   // Connect to WiFi (with detailed feedback on LCD)
   WiFi.mode(WIFI_STA);  // Set WiFi mode to station (client)
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
   // Configure static IP before connecting
   if (!WiFi.config(staticIP, gateway, subnet, dns)) {
     Serial.println("STA Failed to configure static IP");
@@ -261,6 +268,14 @@ void loop() {
     server.handleClient();
     app.loop();
     pollFirebaseCommand();
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiReconnectMs >= WIFI_RECONNECT_INTERVAL_MS) {
+      lastWifiReconnectMs = millis();
+      WiFi.reconnect();
+    }
+    if (millis() - lastHeapLogMs >= HEAP_LOG_INTERVAL_MS) {
+      lastHeapLogMs = millis();
+      Serial.printf("Heap: %u bytes\n", ESP.getFreeHeap());
+    }
 
     // Read potentiometer values
     for (int i = 0; i < CYLINDER_COUNT; i++) {
@@ -344,7 +359,7 @@ void loop() {
         sendDataToDatabase(currentTime, cylinders[0].time, cylinders[1].time, cylinders[2].time, boardID, gameID, playerID);  //SEND CODE, playerID
         lapClearPending = true;
         lapClearStartTime = millis();
-        lastTotalTime = currentTime;
+        lastTotalTime = max(cylinders[0].time, max(cylinders[1].time, cylinders[2].time));
         publishStatus("finished");
         if (currentTime >= stopwatchLimit) {
           //lcd.setCursor(0, 0);
@@ -374,8 +389,10 @@ void loop() {
       // --- Display "Ready" or "Finished!" ---
       if (statusMessageActive && millis() >= statusMessageUntil) {
         statusMessageActive = false;
+        if (statusLine1.length() > 0) {
+          clearLine(1);
+        }
         statusLine1 = "";
-        clearLine(1);
         lastLine0 = "";
       }
 
@@ -394,6 +411,7 @@ void loop() {
       publishStatus(state);
       lastStatusPublishMs = millis();
     }
+    delay(1);
   
 }
 
@@ -464,6 +482,13 @@ void showStatusMessage(const String& line0, const String& line1, unsigned long d
   clearLine(1);
   lcd.setCursor(0, 1);
   lcd.print(line1);
+}
+
+void showLine0Message(const String& line0, unsigned long durationMs) {
+  statusMessageActive = true;
+  statusMessageUntil = millis() + durationMs;
+  statusLine1 = "";
+  setLine0(line0);
 }
 
 void clearLapRows() {
@@ -550,6 +575,9 @@ bool checkLEDLight(CylinderState& cylinder) {
 
 void initFirebase() {
   ssl_client.setInsecure();
+  ssl_client.setTimeout(2000);
+  ssl_client.setConnectionTimeout(2000);
+  ssl_client.setHandshakeTimeout(5);
   initializeApp(async_client, app, getAuth(user_auth), 120000);
   app.getApp(Database);
   Database.url(FIREBASE_DB_URL);
@@ -675,63 +703,59 @@ void applyCommand(const String& command) {
 // Function to send data to Google Apps Script and Firebase Realtime Database
 void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsigned long cylinder2, unsigned long cylinder3, unsigned long boardID, unsigned long gameID, String playerID) {
   if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    const char* url = "https://script.google.com/macros/s/AKfycbwo8wncxh6L0x-wDc5RT1dIAptuNb1eY-IcFOEjII1hwW6AdJlWYsD6ChTkfPoyS2cx/exec";
-    showStatusMessage("Sending data...", "Please wait", 2000);
     bool gasSuccess = false;
     bool fbSuccess = false;
 
-    // Create JSON object for Apps Script
-    JSONVar data;
-    data["totalTime"] = totalTime;
-    data["cylinder1"] = cylinder1;
-    data["cylinder2"] = cylinder2;
-    data["cylinder3"] = cylinder3;
-    data["boardID"] = boardID;
-    data["gameID"] = gameID;
-    data["playerID"] = playerID;
-    data["round"] = currentRound;
-    data["game"] = currentGame;
+    if (ENABLE_GAS) {
+      HTTPClient http;
+      const char* url = "https://script.google.com/macros/s/AKfycbwo8wncxh6L0x-wDc5RT1dIAptuNb1eY-IcFOEjII1hwW6AdJlWYsD6ChTkfPoyS2cx/exec";
+      showLine0Message("Sending data...", 2000);
 
-    String jsonString = JSON.stringify(data);
+      // Create JSON object for Apps Script
+      JSONVar data;
+      data["totalTime"] = totalTime;
+      data["cylinder1"] = cylinder1;
+      data["cylinder2"] = cylinder2;
+      data["cylinder3"] = cylinder3;
+      data["boardID"] = boardID;
+      data["gameID"] = gameID;
+      data["playerID"] = playerID;
+      data["round"] = currentRound;
+      data["game"] = currentGame;
 
-    if (jsonString == "null" || jsonString.length() == 0) {
-      Serial.println("Json Conversion Error");
-      showStatusMessage("Send failed", "JSON error", 2000);
-      return;
-    }
+      String jsonString = JSON.stringify(data);
 
-    http.begin(url);
-    http.setReuse(false);
-    http.setTimeout(15000);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Accept", "application/json");
-
-    int httpResponseCode = http.POST(jsonString);
-
-    if (httpResponseCode > 0) {
-      Serial.printf("[HTTP] POST... code: %d\n", httpResponseCode);
-      String location = http.header("Location");
-      if (location.length() > 0) {
-        Serial.print("Redirect Location: ");
-        Serial.println(location);
+      if (jsonString == "null" || jsonString.length() == 0) {
+        Serial.println("Json Conversion Error");
+        showLine0Message("Fail JSON", 2000);
+        return;
       }
-      String payload = http.getString();
-      Serial.println("Server response:");
-      Serial.println(payload);
-      if ((httpResponseCode >= 200 && httpResponseCode < 300) ||
-          httpResponseCode == HTTP_CODE_FOUND || httpResponseCode == HTTP_CODE_SEE_OTHER ||
-          httpResponseCode == 307 || httpResponseCode == 308) {
-        gasSuccess = true;
+
+      http.begin(url);
+      http.setReuse(false);
+      http.setTimeout(4000);
+      http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("Accept", "application/json");
+
+      int httpResponseCode = http.POST(jsonString);
+
+      if (httpResponseCode > 0) {
+        Serial.printf("[HTTP] POST... code: %d\n", httpResponseCode);
+        if ((httpResponseCode >= 200 && httpResponseCode < 300) ||
+            httpResponseCode == HTTP_CODE_FOUND || httpResponseCode == HTTP_CODE_SEE_OTHER ||
+            httpResponseCode == 307 || httpResponseCode == 308) {
+          gasSuccess = true;
+        } else {
+          gasSuccess = false;
+        }
       } else {
+        Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
         gasSuccess = false;
       }
-    } else {
-      Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
-      gasSuccess = false;
-    }
 
-    http.end();
+      http.end();
+    }
 
     // Also push results to Firebase
     if (app.ready()) {
@@ -760,17 +784,19 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
     }
 
     if (gasSuccess && fbSuccess) {
-      showStatusMessage("Send OK", "GAS + FB", 2000);
+      showLine0Message("Sent GAS+FB", 2000);
     } else if (gasSuccess && !fbSuccess) {
-      showStatusMessage("Send OK", "FB failed", 2000);
+      showLine0Message("Sent GAS / Fail FB", 2000);
     } else if (!gasSuccess && fbSuccess) {
-      showStatusMessage("GAS failed", "FB saved", 2000);
-    } else {
-      showStatusMessage("Send failed", "GAS + FB", 2000);
+      showLine0Message("Fail GAS / Sent FB", 2000);
+    } else if (fbSuccess) {
+      showLine0Message("Sent FB", 2000);
+    } else if (ENABLE_GAS) {
+      showLine0Message("Fail GAS+FB", 2000);
     }
   } else {
     Serial.println("WiFi not connected, skipping POST");
-    showStatusMessage("Send failed", "No WiFi", 2000);
+    showLine0Message("Fail No WiFi", 2000);
   }
 }
 
