@@ -1,0 +1,117 @@
+import wixData from 'wix-data';
+import { initializeApp } from 'firebase/app';
+import { getDatabase, ref, onValue } from 'firebase/database';
+
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "lockpicking-game.firebaseapp.com",
+  databaseURL: "https://lockpicking-game-default-rtdb.firebaseio.com",
+  projectId: "lockpicking-game",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+let staffMap = {};
+
+$w.onReady(async () => {
+  const result = await wixData.query("Staff").limit(1000).find();
+  staffMap = result.items.reduce((acc, p) => {
+    acc[p._id] = p.fullName;
+    return acc;
+  }, {});
+
+  const rootRef = ref(db, '/');
+  onValue(rootRef, (snapshot) => {
+    const data = snapshot.val() || {};
+    const runs = data.runs || {};
+
+    // collect qualifier runs by player
+    const runsByPlayer = {};
+
+    Object.keys(runs).forEach(boardId => {
+      const boardRuns = runs[boardId] || {};
+      Object.keys(boardRuns).forEach(runId => {
+        const r = boardRuns[runId];
+        if (r.round !== "0") return;
+
+        const playerId = r.playerID;
+        if (!playerId) return;
+
+        if (!runsByPlayer[playerId]) runsByPlayer[playerId] = [];
+        runsByPlayer[playerId].push({
+          totalTime: r.totalTime || 0,
+          game: r.game || "",
+          c1: r.cylinder1 || 0,
+          c2: r.cylinder2 || 0,
+          c3: r.cylinder3 || 0,
+        });
+      });
+    });
+
+    // compute best + second best
+    const rows = Object.keys(runsByPlayer).map(playerId => {
+      const times = runsByPlayer[playerId]
+        .filter(r => r.totalTime > 0)
+        .sort((a, b) => a.totalTime - b.totalTime);
+
+      if (times.length === 0) return null;
+
+      const best = times[0];
+      const second = times[1] ? times[1].totalTime : Number.MAX_SAFE_INTEGER;
+      const picked = [best.c1, best.c2, best.c3].filter(v => v > 0).length;
+      const fastestCylinder = [best.c1, best.c2, best.c3].filter(v => v > 0).sort((a, b) => b - a)[0] || 0;
+
+      return {
+        playerId,
+        playerName: staffMap[playerId] || "—",
+        bestTime: fastestCylinder,
+        tieBreak: second,
+        bestGame: best.game,
+        picked,
+        fastestCylinder
+      };
+    }).filter(Boolean);
+
+    // rank by best time, then second best time
+    rows.sort((a, b) => {
+      if (a.picked !== b.picked) return b.picked - a.picked;
+      if (a.fastestCylinder !== b.fastestCylinder) return a.fastestCylinder - b.fastestCylinder;
+      if (a.bestTime !== b.bestTime) return a.bestTime - b.bestTime;
+      return a.tieBreak - b.tieBreak;
+    });
+
+    // build table rows
+    $w('#qualifierTable').rows = rows.map((r, idx) => ({
+      rank: formatRank(idx + 1),
+      player: r.playerName,
+      best: formatMs(r.fastestCylinder),
+      heat: r.bestGame,
+      picked: formatPicked(r.picked)
+    }));
+  });
+});
+
+function formatRank(rank) {
+  if (rank === 1) return `🥇 ${rank}`;
+  if (rank === 2) return `🥈 ${rank}`;
+  if (rank === 3) return `🥉 ${rank}`;
+  return rank.toString();
+}
+
+function formatPicked(count) {
+  const filled = "🟢".repeat(count);
+  const empty = "⚪".repeat(Math.max(0, 3 - count));
+  return `${filled}${empty} (${count})`;
+}
+
+function formatMs(ms) {
+  const total = Math.floor(ms / 10);
+  const mins = Math.floor(total / 6000);
+  const secs = Math.floor((total % 6000) / 100);
+  const hund = total % 100;
+  return `${pad(mins)}:${pad(secs)}:${pad(hund)}`;
+}
+function pad(n) {
+  return n.toString().padStart(2, '0');
+}

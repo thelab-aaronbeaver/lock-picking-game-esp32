@@ -6,7 +6,7 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <HTTPClient.h>
+#include <time.h>
 #include <WebServer.h>
 #include <uri/UriBraces.h>
 #include <Arduino_JSON.h>  // For JSON parsing
@@ -98,10 +98,6 @@ bool allLedsOff() {
 const char* ssid = "Hardware Setup";
 const char* password = "Lock6121";
 //const int WIFI_CHANNEL = 6;
-IPAddress staticIP(192, 168, 1, 24);  // Desired static IP
-IPAddress gateway(192, 168, 1, 1);    // Gateway IP (usually your router)
-IPAddress subnet(255, 255, 255, 0);   // Subnet mask
-IPAddress dns(1, 1, 1, 1);            // DNS server IP (often the same as the gateway)
 
 
 
@@ -140,7 +136,10 @@ unsigned long lastWifiReconnectMs = 0;
 unsigned long lastHeapLogMs = 0;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 10000;
 const unsigned long HEAP_LOG_INTERVAL_MS = 30000;
-const bool ENABLE_GAS = false;
+AsyncResult commandResult;
+bool commandRequestInFlight = false;
+unsigned long commandRequestStartMs = 0;
+const unsigned long COMMAND_REQUEST_TIMEOUT_MS = 4000;
 
 
 // Flag to indicate if the stopwatch should be started
@@ -151,6 +150,8 @@ void publishStatus(const String& state);
 void pollFirebaseCommand();
 void applyCommand(const String& command);
 String jsonEscape(const String& input);
+unsigned long getEpochSeconds();
+String getIsoTimestamp();
 
 void setup() {
   Serial.begin(115200);
@@ -181,10 +182,6 @@ void setup() {
   WiFi.mode(WIFI_STA);  // Set WiFi mode to station (client)
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
-  // Configure static IP before connecting
-  if (!WiFi.config(staticIP, gateway, subnet, dns)) {
-    Serial.println("STA Failed to configure static IP");
-  }
   WiFi.begin(ssid, password);
 
   int wifiRetryCount = 0;
@@ -227,6 +224,7 @@ void setup() {
     lcd.print("SCAN QR for info");
     delay(10000);  // Show message for a few seconds
     lcd.clear();
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     setLine0("Ready");
     firebaseBasePath = "/boards/" + String(boardID);
     initFirebase();
@@ -614,32 +612,45 @@ void pollFirebaseCommand() {
   }
   lastCommandPollMs = millis();
 
-  String cmdPath = firebaseBasePath + "/command";
-  String cmd = Database.get<String>(async_client, cmdPath);
-  if (async_client.lastError().code() != 0) {
+  if (commandRequestInFlight) {
+    if (millis() - commandRequestStartMs > COMMAND_REQUEST_TIMEOUT_MS) {
+      commandRequestInFlight = false;
+    } else if (commandResult.available()) {
+      String cmd = String(commandResult.c_str());
+      cmd.trim();
+      if (cmd.startsWith("\"") && cmd.endsWith("\"") && cmd.length() >= 2) {
+        cmd = cmd.substring(1, cmd.length() - 1);
+      }
+      if (cmd.length() > 0 && cmd != "idle" && cmd != "null") {
+        if (cmd == "start") {
+          String pidPath = firebaseBasePath + "/playerID";
+          String pid = Database.get<String>(async_client, pidPath);
+          if (async_client.lastError().code() == 0 && pid != "null") {
+            playerID = pid;
+          }
+          String roundPath = "/scoreboard/current/round";
+          String gamePath = "/scoreboard/current/game";
+          String roundValue = Database.get<String>(async_client, roundPath);
+          if (async_client.lastError().code() == 0 && roundValue != "null") {
+            currentRound = roundValue;
+          }
+          String gameValue = Database.get<String>(async_client, gamePath);
+          if (async_client.lastError().code() == 0 && gameValue != "null") {
+            currentGame = gameValue;
+          }
+        }
+        applyCommand(cmd);
+        Database.set(async_client, firebaseBasePath + "/command", String("idle"));
+      }
+      commandRequestInFlight = false;
+    }
     return;
   }
-  cmd.trim();
-  if (cmd.length() > 0 && cmd != "idle" && cmd != "null") {
-    if (cmd == "start") {
-      String pidPath = firebaseBasePath + "/playerID";
-      String pid = Database.get<String>(async_client, pidPath);
-      if (async_client.lastError().code() == 0 && pid != "null") {
-        playerID = pid;
-      }
-      String roundPath = "/scoreboard/current/round";
-      String gamePath = "/scoreboard/current/game";
-      String roundValue = Database.get<String>(async_client, roundPath);
-      if (async_client.lastError().code() == 0 && roundValue != "null") {
-        currentRound = roundValue;
-      }
-      String gameValue = Database.get<String>(async_client, gamePath);
-      if (async_client.lastError().code() == 0 && gameValue != "null") {
-        currentGame = gameValue;
-      }
-    }
-    applyCommand(cmd);
-    Database.set(async_client, cmdPath, String("idle"));
+
+  Database.get(async_client, firebaseBasePath + "/command", commandResult);
+  if (async_client.lastError().code() == 0) {
+    commandRequestInFlight = true;
+    commandRequestStartMs = millis();
   }
 }
 
@@ -662,6 +673,26 @@ String jsonEscape(const String& input) {
     }
   }
   return output;
+}
+
+unsigned long getEpochSeconds() {
+  time_t now = time(nullptr);
+  if (now < 100000) {
+    return 0;
+  }
+  return static_cast<unsigned long>(now);
+}
+
+String getIsoTimestamp() {
+  time_t now = time(nullptr);
+  if (now < 100000) {
+    return "";
+  }
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  char buf[21];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buf);
 }
 
 void applyCommand(const String& command) {
@@ -700,62 +731,12 @@ void applyCommand(const String& command) {
   }
 }
 
-// Function to send data to Google Apps Script and Firebase Realtime Database
+// Function to send data to Firebase Realtime Database
 void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsigned long cylinder2, unsigned long cylinder3, unsigned long boardID, unsigned long gameID, String playerID) {
   if (WiFi.status() == WL_CONNECTED) {
-    bool gasSuccess = false;
     bool fbSuccess = false;
 
-    if (ENABLE_GAS) {
-      HTTPClient http;
-      const char* url = "https://script.google.com/macros/s/AKfycbwo8wncxh6L0x-wDc5RT1dIAptuNb1eY-IcFOEjII1hwW6AdJlWYsD6ChTkfPoyS2cx/exec";
-      showLine0Message("Sending data...", 2000);
-
-      // Create JSON object for Apps Script
-      JSONVar data;
-      data["totalTime"] = totalTime;
-      data["cylinder1"] = cylinder1;
-      data["cylinder2"] = cylinder2;
-      data["cylinder3"] = cylinder3;
-      data["boardID"] = boardID;
-      data["gameID"] = gameID;
-      data["playerID"] = playerID;
-      data["round"] = currentRound;
-      data["game"] = currentGame;
-
-      String jsonString = JSON.stringify(data);
-
-      if (jsonString == "null" || jsonString.length() == 0) {
-        Serial.println("Json Conversion Error");
-        showLine0Message("Fail JSON", 2000);
-        return;
-      }
-
-      http.begin(url);
-      http.setReuse(false);
-      http.setTimeout(4000);
-      http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-      http.addHeader("Content-Type", "application/json");
-      http.addHeader("Accept", "application/json");
-
-      int httpResponseCode = http.POST(jsonString);
-
-      if (httpResponseCode > 0) {
-        Serial.printf("[HTTP] POST... code: %d\n", httpResponseCode);
-        if ((httpResponseCode >= 200 && httpResponseCode < 300) ||
-            httpResponseCode == HTTP_CODE_FOUND || httpResponseCode == HTTP_CODE_SEE_OTHER ||
-            httpResponseCode == 307 || httpResponseCode == 308) {
-          gasSuccess = true;
-        } else {
-          gasSuccess = false;
-        }
-      } else {
-        Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
-        gasSuccess = false;
-      }
-
-      http.end();
-    }
+    showLine0Message("Sending data...", 2000);
 
     // Also push results to Firebase
     if (app.ready()) {
@@ -768,7 +749,11 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
       fbJson += "\"gameID\":" + String(gameID) + ",";
       fbJson += "\"playerID\":\"" + jsonEscape(playerID) + "\",";
       fbJson += "\"round\":\"" + jsonEscape(currentRound) + "\",";
-      fbJson += "\"game\":\"" + jsonEscape(currentGame) + "\"";
+      fbJson += "\"game\":\"" + jsonEscape(currentGame) + "\",";
+      unsigned long epochSeconds = getEpochSeconds();
+      String isoTimestamp = getIsoTimestamp();
+      fbJson += "\"timestamp\":" + String(epochSeconds) + ",";
+      fbJson += "\"timestampIso\":\"" + jsonEscape(isoTimestamp) + "\"";
       fbJson += "}";
       String runsPath = "/runs/" + String(boardID);
       Database.push(async_client, runsPath, object_t(fbJson));
@@ -783,16 +768,10 @@ void sendDataToDatabase(unsigned long totalTime, unsigned long cylinder1, unsign
       Serial.println("Firebase not ready, skipping RTDB push");
     }
 
-    if (gasSuccess && fbSuccess) {
-      showLine0Message("Sent GAS+FB", 2000);
-    } else if (gasSuccess && !fbSuccess) {
-      showLine0Message("Sent GAS / Fail FB", 2000);
-    } else if (!gasSuccess && fbSuccess) {
-      showLine0Message("Fail GAS / Sent FB", 2000);
-    } else if (fbSuccess) {
+    if (fbSuccess) {
       showLine0Message("Sent FB", 2000);
-    } else if (ENABLE_GAS) {
-      showLine0Message("Fail GAS+FB", 2000);
+    } else {
+      showLine0Message("Fail FB", 2000);
     }
   } else {
     Serial.println("WiFi not connected, skipping POST");

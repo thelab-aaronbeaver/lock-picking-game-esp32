@@ -1,0 +1,150 @@
+import wixData from 'wix-data';
+import { initializeApp } from 'firebase/app';
+import { getDatabase, ref, onValue } from 'firebase/database';
+
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "lockpicking-game.firebaseapp.com",
+  databaseURL: "https://lockpicking-game-default-rtdb.firebaseio.com",
+  projectId: "lockpicking-game",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+let staffMap = {};
+let allRows = [];
+const dateModeOptions = [
+  { label: "All Dates", value: "all" },
+  { label: "Specific Day", value: "day" },
+];
+
+const roundOptions = [
+  { label: "All Rounds", value: "all" },
+  { label: "Round 1", value: "1" },
+  { label: "Round 2", value: "2" },
+  { label: "Round 3", value: "3" },
+  { label: "Round 4", value: "4" },
+];
+
+const gameOptions = [
+  { label: "All Games", value: "all" },
+  { label: "Game 1", value: "1" },
+  { label: "Game 2", value: "2" },
+  { label: "Game 3", value: "3" },
+  { label: "Game 4", value: "4" },
+];
+
+$w.onReady(async () => {
+  const result = await wixData.query("Staff").limit(1000).find();
+  staffMap = result.items.reduce((acc, p) => {
+    acc[p._id] = p.fullName;
+    return acc;
+  }, {});
+
+  $w('#roundFilter').options = roundOptions;
+  $w('#gameFilter').options = gameOptions;
+  $w('#roundFilter').value = "all";
+  $w('#gameFilter').value = "all";
+
+  // date filter
+  $w('#dateMode').options = dateModeOptions;
+  $w('#dateMode').value = "all";
+  $w('#dateMode').onChange(applyFilters);
+  $w('#dateFilter').onChange(applyFilters);
+
+  $w('#roundFilter').onChange(applyFilters);
+  $w('#gameFilter').onChange(applyFilters);
+
+  const rootRef = ref(db, '/');
+  onValue(rootRef, (snapshot) => {
+    const data = snapshot.val() || {};
+    const runs = data.runs || {};
+
+    allRows = [];
+    Object.keys(runs).forEach(boardId => {
+      const boardRuns = runs[boardId] || {};
+      Object.keys(boardRuns).forEach(runId => {
+        const r = boardRuns[runId];
+        allRows.push({
+          boardId,
+          playerName: staffMap[r.playerID] || "—",
+          totalTime: r.totalTime || 0,
+          c1: r.cylinder1 || 0,
+          c2: r.cylinder2 || 0,
+          c3: r.cylinder3 || 0,
+          round: r.round || "",
+          game: r.game || "",
+          timestamp: r.timestamp || 0
+        });
+      });
+    });
+
+    applyFilters();
+  });
+});
+
+function applyFilters() {
+  const roundValue = $w('#roundFilter').value;
+  const gameValue = $w('#gameFilter').value;
+
+  const dateMode = $w('#dateMode').value;
+  const filterDate = $w('#dateFilter').value;
+  const useDate = dateMode === "day" && filterDate;
+  const fromEpoch = useDate ? toEpochStart(filterDate) : 0;
+  const toEpoch = useDate ? toEpochEnd(filterDate) : Number.MAX_SAFE_INTEGER;
+
+  let filtered = allRows.filter(r => {
+    if (roundValue !== "all" && r.round !== roundValue) return false;
+    if (gameValue !== "all" && r.game !== gameValue) return false;
+    if (!r.timestamp) return false;
+    if (r.timestamp < fromEpoch || r.timestamp > toEpoch) return false;
+    return true;
+  });
+
+  filtered.sort((a, b) => a.totalTime - b.totalTime);
+
+  $w('#scoreTable').rows = filtered.map((r, idx) => ({
+    rank: formatRank(idx + 1),
+    board: r.boardId,
+    player: r.playerName,
+    total: formatMs(r.totalTime),
+    c1: formatMs(r.c1),
+    c2: formatMs(r.c2),
+    c3: formatMs(r.c3),
+    round: r.round,
+    game: r.game,
+    date: new Date(r.timestamp * 1000).toLocaleDateString(),
+    time: new Date(r.timestamp * 1000).toLocaleTimeString()
+  }));
+}
+
+function formatRank(rank) {
+  if (rank === 1) return `🥇 ${rank}`;
+  if (rank === 2) return `🥈 ${rank}`;
+  if (rank === 3) return `🥉 ${rank}`;
+  return rank.toString();
+}
+
+function toEpochStart(dateObj) {
+  const d = new Date(dateObj);
+  d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function toEpochEnd(dateObj) {
+  const d = new Date(dateObj);
+  d.setHours(23, 59, 59, 999);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function formatMs(ms) {
+  const total = Math.floor(ms / 10);
+  const mins = Math.floor(total / 6000);
+  const secs = Math.floor((total % 6000) / 100);
+  const hund = total % 100;
+  return `${pad(mins)}:${pad(secs)}:${pad(hund)}`;
+}
+function pad(n) {
+  return n.toString().padStart(2, '0');
+}

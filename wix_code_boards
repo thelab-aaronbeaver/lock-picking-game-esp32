@@ -14,11 +14,12 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
 let staffOptions = [];
-const boardIds = ["18"];
+let boardIds = [];
 const clearedBoards = {};
 const lastSeenAt = {};
 const lastReportedMs = {};
 const roundOptions = [
+{ label: "Qualifier", value: "0" },
   { label: "Round 1", value: "1" },
   { label: "Round 2", value: "2" },
   { label: "Round 3", value: "3" },
@@ -28,12 +29,20 @@ const gameOptions = [
   { label: "Game 1", value: "1" },
   { label: "Game 2", value: "2" },
   { label: "Game 3", value: "3" },
-  { label: "Game 4", value: "4" }
+  { label: "Game 4", value: "4" },
+  { label: "Game 5", value: "5" },
+  { label: "Game 6", value: "6" },
+  { label: "Game 7", value: "7" },
+  { label: "Game 8", value: "8" },
+  { label: "Game 9", value: "9" },
+  { label: "Game 10", value: "10" }
+  
 ];
-const ACTIVE_WINDOW_MS = 30000; // 30s
+const ACTIVE_WINDOW_MS = 5000; // 30s
 
 $w.onReady(async () => {
-  const result = await wixData.query("Staff").limit(1000).find();
+    const result = await wixData.query("Staff").ascending("fullName").limit(1000).find();
+
   staffOptions = result.items.map(p => ({
     label: p.fullName,
     value: p._id
@@ -54,9 +63,18 @@ $w.onReady(async () => {
     $item('#resetBtn').onClick(() => setCommand(itemData.boardId, "reset"));
   });
 
-  $w('#startAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "start")));
-  $w('#stopAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "stop")));
-  $w('#resetAllBtn').onClick(() => boardIds.forEach(id => setCommand(id, "reset")));
+  $w('#startAllBtn').onClick(() => {
+    console.log('[startAll] boardIds', boardIds);
+    boardIds.forEach(id => setCommand(id, "start"));
+  });
+  $w('#stopAllBtn').onClick(() => {
+    console.log('[stopAll] boardIds', boardIds);
+    boardIds.forEach(id => setCommand(id, "stop"));
+  });
+  $w('#resetAllBtn').onClick(() => {
+    console.log('[resetAll] boardIds', boardIds);
+    boardIds.forEach(id => setCommand(id, "reset"));
+  });
 
   // Master round/game selectors (outside repeater)
   $w('#roundDropdown').options = roundOptions;
@@ -74,6 +92,8 @@ $w.onReady(async () => {
     console.log('[firebase] snapshot', data);
     const current = data.scoreboard?.current || {};
     const boards = data.boards || {};
+    boardIds = Object.keys(boards).sort();
+    console.log('[boards] ids', boardIds);
     const items = boardIds
       .map(id => {
         const status = boards[id]?.status || {};
