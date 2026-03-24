@@ -19,7 +19,7 @@ const clearedBoards = {};
 const lastSeenAt = {};
 const lastReportedMs = {};
 const roundOptions = [
-{ label: "Qualifier", value: "0" },
+  { label: "Qualifier", value: "0" },
   { label: "Round 1", value: "1" },
   { label: "Round 2", value: "2" },
   { label: "Round 3", value: "3" },
@@ -36,12 +36,38 @@ const gameOptions = [
   { label: "Game 8", value: "8" },
   { label: "Game 9", value: "9" },
   { label: "Game 10", value: "10" }
-  
+
 ];
 const ACTIVE_WINDOW_MS = 5000; // 30s
 
+// Optional custom labels by board ID (string key)
+const boardNameMap = {
+  "24": "CHS ",
+  "18": "CLT",
+  "20": "CLT",
+  "22": "CLT",
+  "23": "CLT",
+  "16": "AND",
+  "19": "AND"
+};
+
+// Custom board groups (edit these to match your layout)
+const customBoardGroups = {
+  "G1": ["18", "20", "22", "23"],
+  "G2": ["16", "19"],
+  "G3": ["24"]
+};
+
+const boardGroupMap = Object.entries(customBoardGroups).reduce((acc, [groupName, ids]) => {
+  ids.forEach((id) => {
+    acc[id] = groupName;
+  });
+  return acc;
+}, {});
+const groupOrder = Object.keys(customBoardGroups);
+
 $w.onReady(async () => {
-    const result = await wixData.query("Staff").ascending("fullName").limit(1000).find();
+  const result = await wixData.query("Staff").ascending("fullName").limit(1000).find();
 
   staffOptions = result.items.map(p => ({
     label: p.fullName,
@@ -92,7 +118,7 @@ $w.onReady(async () => {
     console.log('[firebase] snapshot', data);
     const current = data.scoreboard?.current || {};
     const boards = data.boards || {};
-    boardIds = Object.keys(boards).sort();
+    boardIds = Object.keys(boards).sort((a, b) => Number(a) - Number(b));
     console.log('[boards] ids', boardIds);
     const items = boardIds
       .map(id => {
@@ -106,6 +132,8 @@ $w.onReady(async () => {
         return {
           _id: id,
           boardId: id,
+          boardName: boards[id]?.name || boardNameMap[id] || "",
+          boardGroup: boardGroupMap[id] || "Ungrouped",
           state: status.state || "offline",
           total: status.lastTotalTime || 0,
           running: status.running || false,
@@ -120,13 +148,24 @@ $w.onReady(async () => {
         const lastSeen = lastSeenAt[item.boardId] || 0;
         const age = Date.now() - lastSeen;
         return lastSeen > 0 && age <= ACTIVE_WINDOW_MS;
+      })
+      .sort((a, b) => {
+        const aGroupIndex = groupOrder.indexOf(a.boardGroup);
+        const bGroupIndex = groupOrder.indexOf(b.boardGroup);
+        const aOrder = aGroupIndex === -1 ? Number.MAX_SAFE_INTEGER : aGroupIndex;
+        const bOrder = bGroupIndex === -1 ? Number.MAX_SAFE_INTEGER : bGroupIndex;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return Number(a.boardId) - Number(b.boardId);
       });
 
     $w('#boardRepeater').data = items;
 
     $w('#boardRepeater').forEachItem(($item, itemData) => {
       console.log('[repeater] update', itemData.boardId, itemData);
-      $item('#boardTitle').text = `Board ${itemData.boardId}`;
+      const title = itemData.boardName
+        ? `${itemData.boardGroup} - ${itemData.boardName} (Board ${itemData.boardId})`
+        : `${itemData.boardGroup} - Board ${itemData.boardId}`;
+      $item('#boardTitle').text = title;
       $item('#boardState').text = `State: ${itemData.state}`;
       $item('#boardTime').text = `Last: ${formatMs(itemData.total)}`;
 
