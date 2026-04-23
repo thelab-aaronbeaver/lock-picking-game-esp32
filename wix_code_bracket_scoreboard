@@ -26,14 +26,13 @@ $w.onReady(async () => {
     const data = snapshot.val() || {};
     const runs = data.runs || {};
 
-    // collect qualifier runs by player
     const runsByPlayer = {};
 
     Object.keys(runs).forEach(boardId => {
       const boardRuns = runs[boardId] || {};
       Object.keys(boardRuns).forEach(runId => {
         const r = boardRuns[runId];
-        if (r.round !== "0") return;
+        if (r.round !== "0") return; // Qualifier round
 
         const playerId = r.playerID;
         if (!playerId) return;
@@ -49,46 +48,76 @@ $w.onReady(async () => {
       });
     });
 
-    // compute best + second best
     const rows = Object.keys(runsByPlayer).map(playerId => {
-      const times = runsByPlayer[playerId]
+      const candidates = runsByPlayer[playerId]
         .filter(r => r.totalTime > 0)
-        .sort((a, b) => a.totalTime - b.totalTime);
+        .map(r => {
+          const picked = [r.c1, r.c2, r.c3].filter(v => v > 0).length;
+          const lastPickedTime = [r.c1, r.c2, r.c3].filter(v => v > 0).sort((a, b) => b - a)[0] || 0;
+          const rankTime = picked === 3 ? (r.totalTime || 0) : lastPickedTime;
+          return {
+            ...r,
+            picked,
+            rankTime
+          };
+        })
+        .sort((a, b) => {
+          if (a.picked !== b.picked) return b.picked - a.picked;      // most locks first
+          if (a.rankTime !== b.rankTime) return a.rankTime - b.rankTime; // then fastest for that lock-count
+          return (a.totalTime || 0) - (b.totalTime || 0);             // stable tie-break
+        });
 
-      if (times.length === 0) return null;
+      if (candidates.length === 0) return null;
 
-      const best = times[0];
-      const second = times[1] ? times[1].totalTime : Number.MAX_SAFE_INTEGER;
-      const picked = [best.c1, best.c2, best.c3].filter(v => v > 0).length;
-      const fastestCylinder = [best.c1, best.c2, best.c3].filter(v => v > 0).sort((a, b) => b - a)[0] || 0;
+      const best = candidates[0];
+      const second = candidates[1] ? candidates[1].rankTime : Number.MAX_SAFE_INTEGER;
+
+      const picked = best.picked;
+      const rankTime = best.rankTime;
 
       return {
         playerId,
         playerName: staffMap[playerId] || "—",
-        bestTime: fastestCylinder,
+        bestTime: rankTime,
         tieBreak: second,
         bestGame: best.game,
-        picked,
-        fastestCylinder
+        picked
       };
     }).filter(Boolean);
 
-    // rank by best time, then second best time
     rows.sort((a, b) => {
       if (a.picked !== b.picked) return b.picked - a.picked;
-      if (a.fastestCylinder !== b.fastestCylinder) return a.fastestCylinder - b.fastestCylinder;
       if (a.bestTime !== b.bestTime) return a.bestTime - b.bestTime;
       return a.tieBreak - b.tieBreak;
     });
 
-    // build table rows
-    $w('#qualifierTable').rows = rows.map((r, idx) => ({
-      rank: formatRank(idx + 1),
+    const repeaterData = rows.map((r, idx) => ({
+      _id: r.playerId,
+      rank: idx + 1,
       player: r.playerName,
-      best: formatMs(r.fastestCylinder),
-      heat: r.bestGame,
-      picked: formatPicked(r.picked)
+      best: formatMs(r.bestTime),
+      picked: formatPicked(r.picked),
+      heat: r.bestGame
     }));
+
+    $w('#bracketRepeater').data = repeaterData;
+
+    $w('#bracketRepeater').onItemReady(($item, itemData) => {
+      $item('#rankText').text = formatRank(itemData.rank);
+      $item('#playerText').text = itemData.player;
+      $item('#bestTimeText').text = itemData.best;
+      $item('#pickedText').text = itemData.picked;
+      $item('#heatText').text = itemData.heat || "";
+
+      // styling
+      if (itemData.rank === 1) $item('#rowBg').style.backgroundColor = "#7FBF4A";
+      else if (itemData.rank === 2) $item('#rowBg').style.backgroundColor = "#73AD44";
+      else if (itemData.rank === 3) $item('#rowBg').style.backgroundColor = "#6A9D3F";
+      else $item('#rowBg').style.backgroundColor = "#5F7A3A";
+
+      $item('#bestTimeText').style.fontSize = "18px";
+      $item('#bestTimeText').style.fontWeight = "bold";
+    });
   });
 });
 
